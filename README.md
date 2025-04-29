@@ -7,6 +7,7 @@ Depending on the use case, you can deploy all the components or just some of the
 Working components:
 - Timesketch
 - Velociraptor
+
 To be added:
 - Plaso
 - Custom parsing modules
