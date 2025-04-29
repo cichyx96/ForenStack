@@ -1,0 +1,135 @@
+---
+- name: Setup timesketch on instance
+  hosts: localhost
+  become: yes
+  vars:
+    region: eu-west-1
+    velociraptor_url: "https://github.com/Velocidex/velociraptor/releases/download/v0.74/velociraptor-v0.74.1-linux-amd64-musl"
+    velociraptor_config_bucket: "{{ velociraptor_config_bucket }}"
+    velociraptor_config_key: "{{ velociraptor_config_key }}"
+    velociraptor_config_filename: "{{ velociraptor_config_filename }}"
+    velociraptor_username: "{{ velociraptor_username }}"
+    velociraptor_password_key: "{{ velociraptor_password_key }}"
+    velociraptor_server_config_path: "/etc/velociraptor/server.config.yaml"
+
+  tasks:
+    - name: Install dependencies
+      apt:
+        name:
+          - python3-pip
+          - python3-venv
+          - python3-dev
+          - libffi-dev
+          - libssl-dev
+          - build-essential
+        state: present
+        update_cache: yes
+
+    - name: Install boto3 and botocore
+      pip:
+        name:
+          - boto3
+          - botocore
+        state: present
+    
+    - name: Create /etc/velociraptor
+      ansible.builtin.file:
+        path: /etc/velociraptor
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+
+    # - name: Download file from S3
+    #   amazon.aws.aws_s3:
+    #     bucket: "{{ velociraptor_config_bucket }}"
+    #     object: "{{ velociraptor_config_key }}"
+    #     dest: "/etc/velociraptor/{{ velociraptor_config_filename }}"
+    #     mode: get
+    #   register: s3_download_result
+  
+    - name: Add velociraptor group
+      group:
+        name: velociraptor
+        state: present
+
+    - name: Add velociraptor user
+      user:
+        name: velociraptor
+        group: velociraptor
+        shell: /bin/false
+        home: /opt/velociraptor
+        create_home: no
+
+
+    - name: Create velociraptor directory
+      ansible.builtin.file:
+        path: /opt/velociraptor
+        state: directory
+        owner: velociraptor
+        group: velociraptor
+
+    - name: Download velociraptor binary
+      get_url:
+        url: "{{ velociraptor_url }}"
+        dest: /opt/velociraptor/velociraptor
+        mode: '0755'
+        owner: velociraptor
+        group: velociraptor
+
+    - name: Download Velociraptor merge configuration file from S3
+      amazon.aws.aws_s3:
+        bucket: "{{ velociraptor_config_bucket }}"
+        object: "{{ velociraptor_config_key }}"
+        dest: "/etc/velociraptor/{{ velociraptor_config_filename }}"
+        mode: get
+
+    - name: Create velociraptor server config
+      command: /opt/velociraptor/velociraptor config generate --merge_file /etc/velociraptor/{{ velociraptor_config_filename }} 
+      args:
+        chdir: /opt/velociraptor
+      register: velociraptor_config_result
+    
+    - name: Save velociraptor server config from command
+      copy:
+        content: "{{ velociraptor_config_result.stdout }}"
+        dest: "{{ velociraptor_server_config_path }}"
+        owner: velociraptor
+        group: velociraptor
+        mode: '0644'
+
+
+    - name: Create velociraptor server installer
+      command: /opt/velociraptor/velociraptor debian server --config {{ velociraptor_server_config_path }}  --output /opt/velociraptor/velociraptor-server.deb
+      args:
+        chdir: /opt/velociraptor
+      register: velociraptor_installer_result
+
+    - name: Install velociraptor server
+      apt:
+        deb: /opt/velociraptor/velociraptor-server.deb
+        state: present
+        update_cache: yes
+      register: velociraptor_install_result
+
+    - name: Ensure velociraptor_server is enabled and started
+      service:
+        name: velociraptor_server
+        state: started
+        enabled: yes
+
+    - name: Lookup SSM parameter
+      set_fact:
+        velociraptor_password: "{{ lookup('amazon.aws.aws_ssm', velociraptor_password_key, region=region, decrypt=True) }}"
+        
+    - name: Create Velociraptor user (run as velociraptor user)
+      command: /usr/local/bin/velociraptor.bin --config {{ velociraptor_server_config_path }} user add {{ velociraptor_username }} {{ velociraptor_password }} --role administrator
+      become: yes
+      become_user: velociraptor
+
+    - name: Restart velociraptor server
+      service:
+        name: velociraptor_server
+        state: restarted
+    
